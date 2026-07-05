@@ -1,0 +1,71 @@
+name: Build and push Docker images
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ---------- get latest yt-dlp version ----------
+  get-version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Get latest yt-dlp version
+        id: version
+        run: |
+          VERSION=$(curl -s https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest | jq -r .tag_name)
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+  # ---------- pip ----------
+  build-pip:
+    needs: get-version
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        yt-dlp-version: [ "${{ needs.get-version.outputs.version }}" ]
+        js-runtime: [ "quickjs", "nodejs" ]
+        platform: [ "linux/amd64" ]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Metadata for pip
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ matrix.yt-dlp-version }}-${{ matrix.js-runtime }}-pip
+            type=raw,value=${{ matrix.yt-dlp-version }}-pip,enable=${{ matrix.js-runtime == 'quickjs' }}
+            type=raw,value=latest,enable=${{ matrix.js-runtime == 'quickjs' && github.ref == 'refs/heads/main' }}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.pip
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            YT_DLP_VERSION=${{ matrix.yt-dlp-version }}
+            JS_RUNTIME=${{ matrix.js-runtime }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

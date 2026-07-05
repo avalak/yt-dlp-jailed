@@ -1,0 +1,98 @@
+# syntax=docker/dockerfile:1
+
+# -------------------------------------------
+# Stage 1: generate hashed requirements
+# -------------------------------------------
+FROM alpine:3 AS builder
+
+ARG PROFILE=pin,pin-curl-cffi
+RUN --mount=type=cache,target=/var/cache/apk \
+    --mount=type=cache,target=/root/.cache/pip \
+    apk add python3 py3-pip && \
+    python3 -m venv /opt/venv && \
+    /opt/venv/bin/pip install pip-tools
+WORKDIR /tmp
+RUN --mount=type=cache,target=/root/.cache/pip \
+    echo "yt-dlp[${PROFILE}]" > requirements.in && \
+    /opt/venv/bin/pip-compile --generate-hashes --output-file requirements.txt requirements.in
+
+# -------------------------------------------
+# Stage 2: install yt-dlp into a virtual environment
+# -------------------------------------------
+FROM alpine:3 AS installer
+COPY --from=builder /tmp/requirements.txt /tmp/
+RUN --mount=type=cache,target=/var/cache/apk \
+    --mount=type=cache,target=/root/.cache/pip \
+    apk add python3 py3-pip && \
+    python3 -m venv /opt/venv && \
+    /opt/venv/bin/pip install --require-hashes -r /tmp/requirements.txt && \
+    /opt/venv/bin/python -m compileall -q /opt/venv
+
+# Clean up build artifacts, tests, docs, and pip cache
+RUN find /opt/venv -type d \( -name "build" -o -name "src" -o -name "tests" -o -name "test" -o -name "docs" \) -exec rm -rf {} + 2>/dev/null ; \
+    find /opt/venv -type f \( -name "*.c" -o -name "*.h" -o -name "*.o" \) -delete ;
+#    rm -rf /root/.cache/pip
+
+# -------------------------------------------
+# Stage 3: minimal runtime image
+# -------------------------------------------
+FROM alpine:3 AS runtime
+
+ARG USERNAME=user
+ARG YT_DLP_VERSION=latest
+ARG JS_RUNTIME=quickjs
+
+# Base packages + system python3 (needed for libpython)
+#RUN apk add --no-cache ca-certificates curl bash ffmpeg zlib python3 libwebp
+RUN --mount=type=cache,target=/var/cache/apk \
+    apk add ca-certificates curl bash ffmpeg zlib python3 libwebp
+
+# Optional JS runtime
+RUN --mount=type=cache,target=/var/cache/apk \
+    if [ "${JS_RUNTIME}" != "none" ]; then \
+        apk add ${JS_RUNTIME}; \
+    fi
+
+# Copy the virtual environment (symlinks to system python)
+COPY --from=installer /opt/venv /opt/venv
+RUN ln -s /opt/venv/bin/yt-dlp /usr/local/bin/yt-dlp && \
+    ln -s /opt/venv/bin/python /usr/local/bin/python
+
+# Copy project files
+COPY src/ /opt/yt-dlp-jailed/
+
+# Replace JS runtime placeholder
+RUN if [ "${JS_RUNTIME}" = "none" ]; then JS_ENTRY="none"; else JS_ENTRY="${JS_RUNTIME}"; fi && \
+    sed -i "s/@JS_RUNTIME@/${JS_ENTRY}/g" /opt/yt-dlp-jailed/yt-dlp.conf && \
+    cp /opt/yt-dlp-jailed/yt-dlp.conf /etc/yt-dlp.base.conf && \
+    ln -sf /etc/yt-dlp.base.conf /etc/yt-dlp.conf
+
+ENV JS_RUNTIME=${JS_RUNTIME}
+
+RUN chmod +x /opt/yt-dlp-jailed/script-runner.sh /opt/yt-dlp-jailed/scripts/*.sh /opt/yt-dlp-jailed/lib/*.sh
+
+RUN adduser -D -h /tmp/home ${USERNAME} && \
+    mkdir -p /output /cache && chown ${USERNAME}:${USERNAME} /output /cache
+ENV XDG_CACHE_HOME=/cache
+
+LABEL org.opencontainers.image.title="yt-dlp-jailed"
+LABEL software="yt-dlp+ffmpeg"
+LABEL version="${YT_DLP_VERSION}"
+LABEL js-runtime="${JS_RUNTIME}"
+
+ENV OUTPUT_DIR=/output
+WORKDIR /output
+USER ${USERNAME}
+ENTRYPOINT ["/opt/yt-dlp-jailed/script-runner.sh"]
+
+# Allow extending the image
+ONBUILD WORKDIR /output
+ONBUILD USER root
+ONBUILD ENV PATH="/opt/venv/bin:${PATH}"
+ONBUILD COPY --chown=user:user requirements.txt* /tmp/
+ONBUILD RUN if [ -f /tmp/requirements.txt ]; then \
+    pip install --no-cache-dir -r /tmp/requirements.txt; \
+    rm /tmp/requirements.txt; \
+    fi
+ONBUILD COPY --chown=user:user . /opt/yt-dlp-jailed/
+ONBUILD USER user

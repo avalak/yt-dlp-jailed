@@ -1,0 +1,98 @@
+# syntax=docker/dockerfile:1
+
+# -------------------------------------------
+# Stage 1: verify prebuilt binary
+# -------------------------------------------
+FROM alpine:3 AS verifier
+
+ARG YT_DLP_VERSION=latest
+ARG TARGETARCH
+
+RUN --mount=type=cache,target=/var/cache/apk \
+    apk add curl gnupg unzip
+
+ENV PUBLIC_KEY_SHA512="58464e482b4a332390a701e0b4b022a6622a224571e5119b107a2061d8b6e2bb61d0b88351e28ebb0b474573f4630799b06f5820f1edd2b55bf341ee24a0eb34"
+
+WORKDIR /tmp
+
+RUN curl -sSLO "https://raw.githubusercontent.com/yt-dlp/yt-dlp/refs/heads/master/public.key" && \
+    echo "${PUBLIC_KEY_SHA512}  public.key" | sha512sum -c - && \
+    gpg --batch --import public.key && \
+    rm public.key
+
+RUN if [ -z "${TARGETARCH}" ]; then \
+        ARCH="$(apk --print-arch)"; \
+    else \
+        ARCH="${TARGETARCH}"; \
+    fi && \
+    case "${ARCH}" in \
+        x86_64|amd64) BINARY_NAME="yt-dlp_musllinux" ;; \
+        aarch64|arm64) BINARY_NAME="yt-dlp_musllinux_aarch64" ;; \
+        *) echo "Unsupported architecture: ${ARCH}" >&2; exit 1 ;; \
+    esac && \
+    if [ "${YT_DLP_VERSION}" = "latest" ]; then \
+        BASE_URL="https://github.com/yt-dlp/yt-dlp/releases/latest/download"; \
+    else \
+        BASE_URL="https://github.com/yt-dlp/yt-dlp/releases/download/${YT_DLP_VERSION}"; \
+    fi && \
+    curl -sSLO "${BASE_URL}/${BINARY_NAME}.zip" && \
+    curl -sSLO "${BASE_URL}/SHA2-512SUMS" && \
+    curl -sSLO "${BASE_URL}/SHA2-512SUMS.sig" && \
+    gpg --batch --verify SHA2-512SUMS.sig SHA2-512SUMS && \
+    grep -E " ${BINARY_NAME}.zip$" SHA2-512SUMS | sha512sum -c - && \
+    unzip "${BINARY_NAME}.zip" && \
+    chmod +x "${BINARY_NAME}" && \
+    mkdir -p /tmp/yt-dlp-staging && \
+    cp -a "${BINARY_NAME}" /tmp/yt-dlp-staging/ && \
+    if [ -d "_internal" ]; then cp -a _internal /tmp/yt-dlp-staging/; fi
+
+# -------------------------------------------
+# Stage 2: minimal runtime image
+# -------------------------------------------
+FROM alpine:3 AS runtime
+
+ARG USERNAME=user
+ARG YT_DLP_VERSION=latest
+ARG JS_RUNTIME=quickjs
+
+# Base packages
+RUN --mount=type=cache,target=/var/cache/apk \
+    apk add ca-certificates curl bash ffmpeg zlib libwebp
+
+# Optional JS runtime
+RUN --mount=type=cache,target=/var/cache/apk \
+    if [ "${JS_RUNTIME}" != "none" ]; then \
+        apk add ${JS_RUNTIME}; \
+    fi
+
+# Copy verified prebuilt binary and internal directory
+COPY --from=verifier /tmp/yt-dlp-staging/ /usr/local/bin/
+RUN chmod +x /usr/local/bin/yt-dlp_musllinux* && \
+    ln -sf /usr/local/bin/yt-dlp_musllinux* /usr/local/bin/yt-dlp
+
+# Copy project files
+COPY src/ /opt/yt-dlp-jailed/
+
+# Replace JS runtime placeholder in config
+RUN if [ "${JS_RUNTIME}" = "none" ]; then JS_ENTRY="none"; else JS_ENTRY="${JS_RUNTIME}"; fi && \
+    sed -i "s/@JS_RUNTIME@/${JS_ENTRY}/g" /opt/yt-dlp-jailed/yt-dlp.conf && \
+    cp /opt/yt-dlp-jailed/yt-dlp.conf /etc/yt-dlp.base.conf && \
+    ln -sf /etc/yt-dlp.base.conf /etc/yt-dlp.conf
+
+ENV JS_RUNTIME=${JS_RUNTIME}
+
+RUN chmod +x /opt/yt-dlp-jailed/script-runner.sh /opt/yt-dlp-jailed/scripts/*.sh /opt/yt-dlp-jailed/lib/*.sh
+
+RUN adduser -D -h /tmp/home ${USERNAME} && \
+    mkdir -p /output /cache && chown ${USERNAME}:${USERNAME} /output /cache
+ENV XDG_CACHE_HOME=/cache
+
+LABEL org.opencontainers.image.title="yt-dlp-jailed"
+LABEL software="yt-dlp+ffmpeg"
+LABEL version="${YT_DLP_VERSION}"
+LABEL js-runtime="${JS_RUNTIME}"
+
+ENV OUTPUT_DIR=/output
+WORKDIR /output
+USER ${USERNAME}
+ENTRYPOINT ["/opt/yt-dlp-jailed/script-runner.sh"]
