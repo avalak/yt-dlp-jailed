@@ -57,3 +57,11 @@ Directory layout:
 └── myplugin/
     └── plugin.sh        # run with: yt-dlp myplugin
 ```
+
+### 4. Updating the image (pull image)
+
+To download the latest version of the Docker image:
+
+```bash
+yt-dlp.sh pull
+```

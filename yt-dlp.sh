@@ -2,6 +2,7 @@
 # yt-dlp-jailed — Secure, isolated yt-dlp launcher
 # =================================================
 # Usage:
+#   ./yt-dlp.sh pull                     # update the Docker image
 #   ./yt-dlp.sh [command] [arguments...]
 #
 # Environment variables (optional):
@@ -91,6 +92,13 @@ IMAGE_NAME="${IMAGE_NAME:-ghcr.io/avalak/yt-dlp-jailed:latest}"
 SCRIPTS_DIR="${SCRIPTS_DIR:-${HOME}/.config/yt-dlp-jailed/extra}"
 USER_CONF="${HOME}/.config/yt-dlp-jailed/yt-dlp.conf"
 OUTPUT_DIR="${OUTPUT_DIR:-${HOME}/YouTube}"
+
+# Update image (pull from registry)
+if [[ "${1:-}" == "pull" ]]; then
+    echo "Pulling image: ${IMAGE_NAME}"
+    docker pull "${IMAGE_NAME}"
+    exit 0
+fi
 
 # Ensure output directory exists
 mkdir -p "${OUTPUT_DIR}"
