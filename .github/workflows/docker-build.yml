@@ -8,6 +8,8 @@ on:
       - 'src/**'
       - 'Dockerfile*'
       - '.dockerignore'
+  repository_dispatch:
+    types: [yt-dlp-release]
   workflow_dispatch:
 
 env:
